@@ -1,80 +1,136 @@
-# AI-Powered Log Anomaly Detector MVP
+# AI-Powered Log Anomaly Detector
 
-This repository contains one hackathon-ready system with two runnable Python processes and one shared root `.env` file:
+Real-time log anomaly detection system with Telegram alerting, local AI analysis, and a demo victim server.
 
-- main service: Telegram bot UI + analyzed alert API + SQLite storage
-- parser service: raw log ingestion + normalization + AI forwarding + heartbeat
-- optional shared `X-API-Key` protection for inter-service write calls
+Built by **matrixpwd** for **AITU Hackathon 2026**, Case #14. The project analyzes server logs in near real time, detects suspicious activity, explains it with a local LLM, and sends alerts to Telegram. :contentReference[oaicite:2]{index=2} :contentReference[oaicite:3]{index=3}
 
-Telegram remains the only user-facing UI.
+## Overview
 
-## Architecture
+This repository is a **monorepo** and now contains the full system:
+
+- `app/` — central node main service: Telegram bot UI, analyzed-alert API, SQLite storage
+- `parser_service/` — raw log ingestion, normalization, AI forwarding, fallback analysis
+- `ai_service/` — AI adapter service for LM Studio / OpenAI-compatible inference
+- `victim_server/` — demo server that generates access logs and forwards them to the parser
+- `tests/` — tests for the central node and parser
+- `docs/` — additional architecture, AI setup, and demo notes
+
+Telegram is the main user-facing interface.
+
+## Problem
+
+Production servers generate thousands of log lines, and manual review is too slow. Most systems do not alert in real time, so attacks like brute-force, SQL injection, XSS, admin probing, and sensitive path scanning can stay hidden in normal traffic. This project solves that problem by analyzing each incoming log event automatically and immediately. :contentReference[oaicite:4]{index=4} :contentReference[oaicite:5]{index=5}
+
+## How it works
 
 The pipeline is:
 
-1. Victim server laptop sends raw log lines to the parser service.
-2. Parser service receives `POST /ingest-log-line`.
-3. Parser normalizes the raw log line into a structured event.
-4. Parser forwards that normalized event to the AI laptop at `AI_ANALYZE_URL`.
-5. AI returns `score`, `severity`, `category`, `explanation`, and `recommended_action`.
-6. Parser converts that response into the existing analyzed-alert contract.
-7. Parser posts the final analyzed alert to the main API `POST /ingest-alert`.
-8. Main service stores the alert and sends the Telegram notification.
+1. A demo victim server receives traffic and writes access logs
+2. The log forwarder sends new raw log lines to the parser
+3. The parser normalizes each line into a structured event
+4. The parser sends the normalized event to the AI adapter
+5. The AI adapter calls LM Studio / OpenAI-compatible inference
+6. The AI adapter returns:
+   - `score`
+   - `severity`
+   - `category`
+   - `explanation`
+   - `recommended_action`
+7. The parser converts that into the final alert contract
+8. The main service stores the alert and sends a Telegram notification
 
-The parser also sends heartbeat updates to the main API at `POST /heartbeat/parser`.
+If the AI service is unavailable, the parser automatically falls back to heuristic analysis so the system still works during demo conditions. :contentReference[oaicite:6]{index=6}
 
-## Repository Structure
+## Architecture
+
+### Central node
+Runs on the main laptop.
+
+Responsibilities:
+- Telegram bot
+- analyzed-alert API
+- SQLite storage
+- parser service
+- parser and detector heartbeat tracking
+
+Processes:
+- `python run_bot.py`
+- `python run_parser.py`
+
+Default ports:
+- Main API: `8000`
+- Parser service: `9001`
+
+### AI node
+Runs on the AI teammate laptop.
+
+Responsibilities:
+- expose `GET /health`
+- expose `POST /analyze`
+- accept normalized events from the parser
+- call LM Studio / local OpenAI-compatible endpoint
+- return structured JSON
+
+Default port:
+- AI adapter: `9000`
+
+### Victim server node
+Runs on the victim server laptop.
+
+Responsibilities:
+- expose demo routes such as `/`, `/login`, `/admin`, `/search`, `/health`
+- write access logs in combined-style format
+- forward new log lines to the parser
+
+Default port:
+- Demo server: `8080`
+
+### Attacker / traffic generator
+Runs on another laptop or client machine.
+
+Responsibilities:
+- generate test traffic
+- simulate brute-force, admin probing, suspicious query strings, path scanning, and other attacks
+
+The original demo architecture uses **4 laptops in one isolated hotspot**:
+- victim server
+- parser + bot
+- AI analysis
+- attacker :contentReference[oaicite:7]{index=7} :contentReference[oaicite:8]{index=8}
+
+## Repository structure
 
 ```text
 .
-|-- app/
-|   |-- __init__.py
-|   |-- api.py
-|   |-- bot.py
-|   |-- config.py
-|   |-- demo.py
-|   |-- formatter.py
-|   |-- main.py
-|   |-- models.py
-|   |-- services.py
-|   |-- storage.py
-|   `-- utils.py
-|-- parser_service/
-|   |-- __init__.py
-|   |-- api.py
-|   |-- config.py
-|   |-- forwarder.py
-|   |-- main.py
-|   |-- models.py
-|   |-- parsers.py
-|   `-- service.py
+|-- app/                  # Main service: Telegram bot + analyzed alert API + storage
+|-- parser_service/       # Parser service: raw log ingestion + normalization + AI forwarding
+|-- ai_service/           # AI adapter for LM Studio / OpenAI-compatible endpoint
+|-- victim_server/        # Demo victim server + log forwarder
 |-- tests/
-|   |-- test_ai_response_normalization.py
-|   |-- test_config_integration.py
-|   |-- test_formatter.py
-|   |-- test_main_api_endpoints.py
-|   |-- test_models.py
-|   |-- test_parser_api_endpoints.py
-|   |-- test_parser_fallback.py
-|   |-- test_parser_pipeline.py
-|   |-- test_parser_service.py
-|   `-- test_storage.py
+|-- docs/
 |-- .env.example
 |-- requirements.txt
 |-- run_bot.py
 |-- run_parser.py
 `-- README.md
-```
+````
 
-## One Root `.env`
+## Detected threats
 
-This project uses exactly one shared `.env` at the repository root.
+The system is designed to detect demo threats such as:
 
-- main service reads the root `.env`
-- parser service reads the same root `.env`
-- parser config is resolved from the repository root even if the parser is started from inside `parser_service/`
+* brute-force attempts on `/login`
+* admin probing on `/admin`
+* SQL injection-style query strings
+* XSS-style input in query parameters
+* path scanning for `/.env`, `/wp-login.php`, `/phpmyadmin`
+* burst traffic / repeated request spikes 
 
-Use this root layout:
+## One root `.env`
+
+The central node uses one shared root `.env`.
+
+Copy `.env.example` to `.env` and fill in:
 
 ```dotenv
 BOT_TOKEN=
@@ -101,234 +157,126 @@ SHARED_API_KEY=
 
 Notes:
 
-- `MAIN_API_HOST=0.0.0.0` makes the main service reachable from other laptops.
-- `PARSER_HOST=0.0.0.0` makes the parser reachable from the victim server laptop.
-- The parser derives its internal main API base URL from `MAIN_API_HOST` and `MAIN_API_PORT`.
-- If `MAIN_API_HOST` is `0.0.0.0`, the parser safely uses loopback internally for same-laptop calls while the server still binds on all interfaces.
-- Leave `SHARED_API_KEY` empty to keep the current open hackathon flow.
-- If `SHARED_API_KEY` is set, clients must send `X-API-Key: <value>` to parser and main write endpoints.
+* `MAIN_API_HOST=0.0.0.0` makes the main service reachable from other laptops
+* `PARSER_HOST=0.0.0.0` makes the parser reachable from the victim server laptop
+* leave `SHARED_API_KEY` empty for the simplest hackathon flow
+* if `SHARED_API_KEY` is set, send `X-API-Key: <value>` to parser and main write endpoints
 
-## Main Service
+## Central node setup
 
-Responsibilities:
+Clone the repo:
 
-- Telegram bot commands:
-  - `/start`
-  - `/help`
-  - `/status`
-  - `/alerts`
-  - `/summary`
-  - `/anomaly <id>`
-  - `/demo_on`
-  - `/demo_off`
-- analyzed alert ingestion
-- SQLite persistence
-- parser/detector heartbeat tracking
-- demo mode
-
-Endpoints:
-
-- `POST /ingest-alert`
-- `POST /heartbeat/parser`
-- `POST /heartbeat/detector`
-- `GET /health`
-- `GET /recent-alerts`
-
-## Parser Service
-
-Responsibilities:
-
-- receive raw logs over HTTP
-- normalize log lines into structured events
-- forward normalized events to the AI laptop
-- convert AI output into the existing `AlertIn` payload
-- send final analyzed alerts to the main API
-- send parser heartbeat to the main API
-- keep working even if raw logs are malformed or AI is temporarily down
-
-Endpoints:
-
-- `POST /ingest-log-line`
-- `GET /health`
-- `GET /recent-events`
-
-Reliability behavior:
-
-- malformed log lines are normalized best-effort
-- AI responses can be plain JSON or JSON wrapped in markdown code fences
-- weird AI values are normalized before alert creation: score is clamped, severity/category/action are sanitized
-- AI forwarding failures do not crash the parser
-- heartbeat failures do not crash the parser
-- if AI is unavailable, parser falls back to a simple heuristic analysis so the demo remains usable
-
-## Data Contracts
-
-### Raw log line into parser
-
-`POST /ingest-log-line`
-
-```json
-{
-  "source": "nginx",
-  "raw_line": "192.168.43.25 - - [24/Apr/2026:14:21:03 +0500] \"GET /admin/login HTTP/1.1\" 403 512",
-  "source_ip": "192.168.43.25",
-  "timestamp": "2026-04-24T14:21:03",
-  "metadata": {
-    "hostname": "victim-laptop"
-  }
-}
+```bash
+git clone https://github.com/zalewko-droid/aitu-hachaton.git
+cd aitu-hachaton
 ```
 
-Optional fields:
-
-- `id`
-- `timestamp`
-- `source`
-- `source_ip`
-- `metadata`
-
-### Normalized event from parser to AI
-
-```json
-{
-  "id": "evt_20260424142103_abc12345",
-  "timestamp": "2026-04-24T14:21:03",
-  "source": "nginx",
-  "source_ip": "192.168.43.25",
-  "event_type": "admin_access",
-  "raw_line": "192.168.43.25 - - [24/Apr/2026:14:21:03 +0500] \"GET /admin/login HTTP/1.1\" 403 512",
-  "normalized_fields": {
-    "method": "GET",
-    "path": "/admin/login",
-    "status_code": 403,
-    "response_bytes": 512,
-    "suspicious_tokens": [
-      "admin_path"
-    ],
-    "metadata": {
-      "hostname": "victim-laptop"
-    }
-  },
-  "metadata": {
-    "hostname": "victim-laptop"
-  }
-}
-```
-
-### AI response expected by parser
-
-```json
-{
-  "score": 0.91,
-  "severity": "high",
-  "category": "web",
-  "explanation": "Repeated suspicious requests with SQL injection patterns and denied responses.",
-  "recommended_action": "investigate"
-}
-```
-
-The parser is also tolerant to:
-
-- JSON inside markdown fences like ```` ```json ... ``` ````
-- string scores like `"91%"`
-- mixed-case values like `"HIGH"` or `"HTTP"`
-- nested wrappers such as `{ "result": { ... } }`
-
-### Final analyzed alert into main API
-
-`POST /ingest-alert`
-
-```json
-{
-  "id": "evt_00124",
-  "timestamp": "2026-04-24T14:21:03",
-  "source": "nginx",
-  "source_ip": "192.168.43.25",
-  "event_type": "http_request",
-  "raw_line": "GET /admin/login HTTP/1.1 ...",
-  "score": 0.91,
-  "severity": "high",
-  "category": "web",
-  "explanation": "Repeated suspicious requests with SQL injection patterns and denied responses.",
-  "recommended_action": "investigate"
-}
-```
-
-This analyzed-alert contract is unchanged.
-
-### Parser heartbeat payload
-
-`POST /heartbeat/parser`
-
-```json
-{
-  "service": "parser",
-  "timestamp": "2026-04-24T14:21:03",
-  "status": "online"
-}
-```
-
-## Setup
-
-1. Create and activate a Python 3.11+ virtual environment.
-2. Install dependencies:
+Install central node dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-3. Copy `.env.example` to `.env`.
-4. Fill in:
-   - Telegram bot token
-   - Telegram admin chat ID
-   - AI laptop IP in `AI_ANALYZE_URL`
-   - any hostname label you want in `NETWORK_SERVER_NAME`
-   - optional `SHARED_API_KEY` if you want header protection
+Create `.env`:
 
-## Run Commands
+```bash
+cp .env.example .env
+```
 
-Main bot/API:
+Start the main service:
 
 ```bash
 python run_bot.py
 ```
 
-Parser service:
+Start the parser service:
 
 ```bash
 python run_parser.py
 ```
 
-Optional parser run from inside the parser folder:
+## AI node setup
+
+Install AI adapter dependencies:
 
 ```bash
-cd parser_service
-python main.py
+pip install -r ai_service/requirements.txt
 ```
 
-That still resolves the same root `.env`.
+Run the adapter:
 
-## curl Examples
+```bash
+python ai_service/adapter.py
+```
 
-If you are using PowerShell on Windows, prefer `curl.exe`.
+Expected endpoints:
 
-If `SHARED_API_KEY` is enabled, add `-H "X-API-Key: <your_key>"` to the write requests below.
+* `GET /health`
+* `POST /analyze`
 
-### POST `/ingest-log-line`
+The adapter talks to LM Studio / OpenAI-compatible inference internally and returns strict JSON for the parser.
+
+## Victim server setup
+
+Install victim server dependencies:
+
+```bash
+pip install -r victim_server/requirements.txt
+```
+
+Run the server:
+
+```bash
+python victim_server/server.py
+```
+
+Useful environment variables for `victim_server`:
+
+* `SERVER_HOST` default: `0.0.0.0`
+* `SERVER_PORT` default: `8080`
+* `SERVER_NAME` default: `victim-laptop`
+* `LOG_FILE_PATH` default: `access.log`
+* `PARSER_FORWARD_URL` default: parser endpoint
+
+Before demo day, set `PARSER_FORWARD_URL` to the real parser endpoint of the central node.
+
+## Health checks
+
+Main API:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+Parser service:
+
+```bash
+curl http://127.0.0.1:9001/health
+```
+
+AI adapter:
+
+```bash
+curl http://127.0.0.1:9000/health
+```
+
+## Example requests
+
+### Send a raw log line to the parser
 
 ```bash
 curl -X POST http://127.0.0.1:9001/ingest-log-line \
   -H "Content-Type: application/json" \
   -d '{
     "source": "nginx",
-    "raw_line": "192.168.43.25 - - [24/Apr/2026:14:21:03 +0500] \"GET /admin/login HTTP/1.1\" 403 512",
+    "raw_line": "10.204.7.225 - - [24/Apr/2026:14:26:15 +0500] \"GET /admin HTTP/1.1\" 403 512",
     "metadata": {
       "hostname": "victim-laptop"
     }
   }'
 ```
 
-### POST `/heartbeat/parser`
+### Send parser heartbeat
 
 ```bash
 curl -X POST http://127.0.0.1:8000/heartbeat/parser \
@@ -340,9 +288,7 @@ curl -X POST http://127.0.0.1:8000/heartbeat/parser \
   }'
 ```
 
-### POST `/heartbeat/detector`
-
-This is the endpoint the external AI service should call to keep detector status fresh on the main service.
+### Send detector heartbeat
 
 ```bash
 curl -X POST http://127.0.0.1:8000/heartbeat/detector \
@@ -354,93 +300,48 @@ curl -X POST http://127.0.0.1:8000/heartbeat/detector \
   }'
 ```
 
-### POST `/ingest-alert`
+## Demo flow
 
-```bash
-curl -X POST http://127.0.0.1:8000/ingest-alert \
-  -H "Content-Type: application/json" \
-  -d '{
-    "id": "evt_00124",
-    "timestamp": "2026-04-24T14:21:03",
-    "source": "nginx",
-    "source_ip": "192.168.43.25",
-    "event_type": "http_request",
-    "raw_line": "GET /admin/login HTTP/1.1 ...",
-    "score": 0.91,
-    "severity": "high",
-    "category": "web",
-    "explanation": "Repeated suspicious requests with SQL injection patterns and denied responses.",
-    "recommended_action": "investigate"
-  }'
-```
+1. Start `run_bot.py`
+2. Start `run_parser.py`
+3. Start `ai_service/adapter.py`
+4. Start `victim_server/server.py`
+5. Confirm `/health` on `8000`, `9001`, and `9000`
+6. Confirm Telegram `/status`
+7. Trigger one `/admin` request
+8. Confirm Telegram alert
+9. Trigger one auth or suspicious query scenario
+10. Show `/alerts`, `/summary`, or `/anomaly <id>`
 
-### PowerShell examples
+In the demo script, the team presents:
 
-```powershell
-curl.exe -X POST http://127.0.0.1:9001/ingest-log-line `
-  -H "Content-Type: application/json" `
-  -d "{\"source\":\"nginx\",\"raw_line\":\"192.168.43.25 - - [24/Apr/2026:14:21:03 +0500] \\\"GET /admin/login HTTP/1.1\\\" 403 512\",\"metadata\":{\"hostname\":\"victim-laptop\"}}"
-```
-
-```powershell
-curl.exe -X POST http://127.0.0.1:8000/heartbeat/parser `
-  -H "Content-Type: application/json" `
-  -d "{\"service\":\"parser\",\"timestamp\":\"2026-04-24T14:21:03\",\"status\":\"online\"}"
-```
-
-```powershell
-curl.exe -X POST http://127.0.0.1:8000/heartbeat/detector `
-  -H "Content-Type: application/json" `
-  -d "{\"service\":\"detector\",\"timestamp\":\"2026-04-24T14:21:03\",\"status\":\"online\"}"
-```
-
-```powershell
-curl.exe -X POST http://127.0.0.1:8000/ingest-alert `
-  -H "Content-Type: application/json" `
-  -d "{\"id\":\"evt_00124\",\"timestamp\":\"2026-04-24T14:21:03\",\"source\":\"nginx\",\"source_ip\":\"192.168.43.25\",\"event_type\":\"http_request\",\"raw_line\":\"GET /admin/login HTTP/1.1 ...\",\"score\":0.91,\"severity\":\"high\",\"category\":\"web\",\"explanation\":\"Repeated suspicious requests with SQL injection patterns and denied responses.\",\"recommended_action\":\"investigate\"}"
-```
-
-### Minimal detector heartbeat helper
-
-The external AI laptop can use any HTTP client. A minimal Python example is:
-
-```python
-from datetime import datetime
-import httpx
-
-with httpx.Client(timeout=5.0) as client:
-    client.post(
-        "http://<MAIN_LAPTOP_IP>:8000/heartbeat/detector",
-        headers={"X-API-Key": "<shared_key_if_enabled>"},
-        json={
-            "service": "detector",
-            "timestamp": datetime.now().replace(microsecond=0).isoformat(),
-            "status": "online",
-        },
-    )
-```
-
-## Demo Flow
-
-1. Start the main service with `python run_bot.py`.
-2. Start the parser service with `python run_parser.py`.
-3. Confirm the main API is up with `/status` in Telegram or `GET /health`.
-4. Send a raw log line to the parser at `http://<YOUR_LAPTOP_IP>:9001/ingest-log-line`.
-5. Let the parser forward the normalized event to the AI laptop.
-6. The parser receives the AI response and posts the final analyzed alert to the main API.
-7. Show the result in Telegram with `/alerts`, `/summary`, and `/anomaly <id>`.
+* the problem
+* the 4-laptop architecture
+* the AI analysis layer
+* detected threats
+* live Telegram alerting
+* final results and next steps  
 
 ## Tests
+
+Run from repository root:
 
 ```bash
 python -m pytest
 ```
 
-## Notes
+## Current limitations
 
-- The parser remains a separate process and is not mixed into the Telegram bot code.
-- The existing `/ingest-alert` contract is preserved.
-- Duplicate alert IDs remain safe because the main storage layer already ignores duplicates.
-- Both services now use one shared root `.env`.
-- Main `/health` exposes parser and detector status clearly at both top level and nested detail.
-- Parser `/health` exposes the latest AI, heartbeat, and alert-delivery error when one of those steps fails.
+* parser recent events are kept in memory
+* the AI contract depends on stable structured JSON output
+* the victim server uses a simple forwarder, not a production log pipeline
+* this project is optimized for a hackathon demo, not production deployment
+
+## Team
+
+* **Maksatuly Tanat** — victim server
+* **Zalesh Sultan** — parser + bot
+* **Mikhailov Andrey** — AI analysis
+* **Moldash Aidyn** — attacker  
+Если хочешь, я следующим сообщением дам ещё готовые `docs/ARCHITECTURE.md` и `docs/AI_ENGINE_SETUP.md`.
+```
