@@ -36,7 +36,7 @@ def load_config(env_file: str | None = None) -> AppConfig:
     if not admin_chat_id_raw:
         raise RuntimeError("ADMIN_CHAT_ID is required. Add it to your environment or .env file.")
 
-    api_host = os.getenv("API_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    api_host = os.getenv("API_HOST", "0.0.0.0").strip() or "0.0.0.0"
     api_port = int(os.getenv("API_PORT", "8000"))
     sqlite_path = str(Path(os.getenv("SQLITE_PATH", "alerts.db")).expanduser())
     demo_mode_default = bool_from_text(os.getenv("DEMO_MODE_DEFAULT"), default=False)
