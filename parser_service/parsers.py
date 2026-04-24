@@ -28,34 +28,15 @@ SQLI_MARKERS = (
     "information_schema",
 )
 PATH_TRAVERSAL_MARKERS = ("../", "..%2f", "%2e%2e%2f")
-SUSPICIOUS_PATH_WEIGHTS = {
-    "/.env": 0.22,
-    "/wp-login.php": 0.18,
-    "/phpmyadmin": 0.20,
-    "/etc/passwd": 0.24,
-    "/wp-admin": 0.10,
-    "/admin": 0.08,
-}
-DANGEROUS_RAW_MARKER_WEIGHTS = {
-    "union select": 0.18,
-    "' or ": 0.14,
-    " or 1=1": 0.16,
-    "or%201%3d1": 0.16,
-    "<script>": 0.14,
-    "../": 0.16,
-    "sqlmap": 0.12,
-    "failed password": 0.10,
-    "failed login": 0.10,
-    "authentication failure": 0.10,
-    "forbidden": 0.06,
-    "unauthorized": 0.06,
-    "denied": 0.06,
-    "panic": 0.14,
-    "traceback": 0.14,
-    "exception": 0.10,
-    "restart": 0.08,
-    "kernel": 0.08,
-}
+DANGEROUS_PATH_MARKERS = ("/.env", "/wp-login.php", "/phpmyadmin", "/etc/passwd")
+XSS_MARKERS = ("<script>", "%3cscript", "javascript:", "onerror=", "onload=")
+SYSTEM_ANOMALY_MARKERS = ("kernel", "systemd", "panic", "traceback", "exception", "restart", "error")
+ACCESS_DENIAL_MARKERS = ("forbidden", "unauthorized", "denied")
+HIGH_RISK_EVENT_TYPES = {"admin_access", "failed_login", "system_anomaly"}
+CRITICAL_EVIDENCE = {"sqli", "path_traversal", "xss_like"}
+MAJOR_EVIDENCE = {"credential_auth", "admin_access", "dangerous_path_exposure", "server_side_anomaly"}
+MODERATE_EVIDENCE = {"access_denial", "system_anomaly"}
+WEAK_EVIDENCE = {"generic_http_activity", "generic_log_pattern"}
 FALLBACK_ACTIONS = {
     "web": "investigate",
     "auth": "review_access",
@@ -132,14 +113,13 @@ def normalize_log_line(payload: RawLogLineIn) -> NormalizedEvent:
 
 
 def derive_fallback_analysis(event: NormalizedEvent) -> AIAnalysisResult:
-    raw_text = event.raw_line.lower()
-    path = str(event.normalized_fields.get("path") or "").lower()
-    suspicious_tokens = {str(item).lower() for item in event.normalized_fields.get("suspicious_tokens", [])}
-    score = compute_fallback_score(event)
+    evidence = extract_fallback_evidence(event)
+    signals = evidence["signals"]
+    score = compute_fallback_score_from_evidence(evidence)
     severity = severity_from_score(score)
     category = default_category_for_event(event.event_type)
 
-    if suspicious_tokens.intersection({"sql_injection", "sqlmap"}):
+    if "sqli" in signals:
         category = "web"
         return AIAnalysisResult(
             score=score,
@@ -149,7 +129,7 @@ def derive_fallback_analysis(event: NormalizedEvent) -> AIAnalysisResult:
             recommended_action=FALLBACK_ACTIONS[category],
         )
 
-    if suspicious_tokens.intersection({"path_traversal"}) or any(marker in path for marker in PATH_TRAVERSAL_MARKERS):
+    if "path_traversal" in signals:
         category = "web"
         return AIAnalysisResult(
             score=score,
@@ -159,7 +139,17 @@ def derive_fallback_analysis(event: NormalizedEvent) -> AIAnalysisResult:
             recommended_action=FALLBACK_ACTIONS[category],
         )
 
-    if event.event_type == "admin_access":
+    if "xss_like" in signals:
+        category = "web"
+        return AIAnalysisResult(
+            score=score,
+            severity=severity,
+            category=category,
+            explanation="Parser fallback detected an XSS-like payload in the incoming request.",
+            recommended_action=FALLBACK_ACTIONS[category],
+        )
+
+    if "admin_access" in signals or event.event_type == "admin_access":
         category = "web"
         return AIAnalysisResult(
             score=score,
@@ -169,7 +159,7 @@ def derive_fallback_analysis(event: NormalizedEvent) -> AIAnalysisResult:
             recommended_action=FALLBACK_ACTIONS[category],
         )
 
-    if event.event_type == "failed_login":
+    if "credential_auth" in signals or event.event_type == "failed_login":
         category = "auth"
         return AIAnalysisResult(
             score=score,
@@ -179,7 +169,7 @@ def derive_fallback_analysis(event: NormalizedEvent) -> AIAnalysisResult:
             recommended_action=FALLBACK_ACTIONS[category],
         )
 
-    if event.event_type == "access_denied":
+    if "access_denial" in signals or event.event_type == "access_denied":
         category = "access"
         return AIAnalysisResult(
             score=score,
@@ -189,7 +179,7 @@ def derive_fallback_analysis(event: NormalizedEvent) -> AIAnalysisResult:
             recommended_action=FALLBACK_ACTIONS[category],
         )
 
-    if event.event_type == "system_anomaly":
+    if "system_anomaly" in signals or "server_side_anomaly" in signals or event.event_type == "system_anomaly":
         category = "system"
         return AIAnalysisResult(
             score=score,
@@ -209,51 +199,96 @@ def derive_fallback_analysis(event: NormalizedEvent) -> AIAnalysisResult:
 
 
 def compute_fallback_score(event: NormalizedEvent) -> float:
-    score = 0.10
+    return compute_fallback_score_from_evidence(extract_fallback_evidence(event))
+
+
+def extract_fallback_evidence(event: NormalizedEvent) -> dict[str, object]:
     raw_text = event.raw_line.lower()
     path = str(event.normalized_fields.get("path") or "").lower()
-    method = str(event.normalized_fields.get("method") or "").upper()
     status_code = event.normalized_fields.get("status_code")
     suspicious_tokens = {str(item).lower() for item in event.normalized_fields.get("suspicious_tokens", [])}
+    signals: set[str] = set()
 
-    score += {
-        "http_request": 0.10,
-        "admin_access": 0.22,
-        "failed_login": 0.20,
-        "access_denied": 0.16,
-        "system_anomaly": 0.18,
-        "generic_log": 0.04,
-    }.get(event.event_type, 0.05)
+    if event.event_type == "failed_login" or FAILED_LOGIN_RE.search(event.raw_line) or event.normalized_fields.get("username"):
+        signals.add("credential_auth")
 
-    if status_code in {401, 403}:
-        score += 0.14
-    elif status_code == 404:
-        score += 0.06
-    elif isinstance(status_code, int) and 500 <= status_code <= 599:
-        score += 0.12
-    elif isinstance(status_code, int) and 400 <= status_code <= 499:
-        score += 0.08
+    if event.event_type == "admin_access" or "admin_path" in suspicious_tokens or "/admin" in path or "/wp-admin" in path:
+        signals.add("admin_access")
 
-    if method == "POST":
-        score += 0.05
+    if event.event_type == "access_denied" or status_code in {401, 403, 404} or _contains_any(raw_text, ACCESS_DENIAL_MARKERS):
+        signals.add("access_denial")
 
-    score += 0.34 if "sql_injection" in suspicious_tokens else 0.0
-    score += 0.20 if "sqlmap" in suspicious_tokens else 0.0
-    score += 0.28 if "path_traversal" in suspicious_tokens else 0.0
-    score += 0.08 if "admin_path" in suspicious_tokens else 0.0
+    if "sql_injection" in suspicious_tokens or "sqlmap" in suspicious_tokens or _contains_any(raw_text, SQLI_MARKERS):
+        signals.add("sqli")
 
-    for marker, weight in SUSPICIOUS_PATH_WEIGHTS.items():
-        if marker in path:
-            score += weight
+    if "path_traversal" in suspicious_tokens or _contains_any(path, PATH_TRAVERSAL_MARKERS) or _contains_any(raw_text, PATH_TRAVERSAL_MARKERS):
+        signals.add("path_traversal")
 
-    for marker, weight in DANGEROUS_RAW_MARKER_WEIGHTS.items():
-        if marker in raw_text:
-            score += weight
+    if _contains_any(path, DANGEROUS_PATH_MARKERS):
+        signals.add("dangerous_path_exposure")
 
-    if event.event_type == "failed_login" and event.normalized_fields.get("username"):
-        score += 0.05
+    if _contains_any(path, XSS_MARKERS) or _contains_any(raw_text, XSS_MARKERS):
+        signals.add("xss_like")
 
-    return max(0.0, min(score, 1.0))
+    if event.event_type == "system_anomaly" or _contains_any(raw_text, SYSTEM_ANOMALY_MARKERS):
+        signals.add("system_anomaly")
+
+    if isinstance(status_code, int) and 500 <= status_code <= 599:
+        signals.add("server_side_anomaly")
+
+    if event.event_type == "http_request" and path:
+        signals.add("generic_http_activity")
+    elif event.event_type == "generic_log":
+        signals.add("generic_log_pattern")
+
+    class_counts = classify_evidence_strength(signals)
+    return {
+        "signals": signals,
+        "high_risk_event_type": event.event_type in HIGH_RISK_EVENT_TYPES,
+        "status_indicates_risk": status_code in {401, 403, 404} or (isinstance(status_code, int) and 500 <= status_code <= 599),
+        **class_counts,
+    }
+
+
+def classify_evidence_strength(signals: set[str]) -> dict[str, int]:
+    critical_count = len(signals & CRITICAL_EVIDENCE)
+    major_count = len(signals & MAJOR_EVIDENCE)
+    moderate_count = len(signals & MODERATE_EVIDENCE)
+    weak_count = len(signals & WEAK_EVIDENCE)
+    class_count = sum(1 for count in (critical_count, major_count, moderate_count, weak_count) if count > 0)
+    return {
+        "critical_count": critical_count,
+        "major_count": major_count,
+        "moderate_count": moderate_count,
+        "weak_count": weak_count,
+        "class_count": class_count,
+        "unique_signal_count": len(signals),
+    }
+
+
+def compute_fallback_score_from_evidence(evidence: dict[str, object]) -> float:
+    critical_count = int(evidence["critical_count"])
+    major_count = int(evidence["major_count"])
+    moderate_count = int(evidence["moderate_count"])
+    weak_count = int(evidence["weak_count"])
+    class_count = int(evidence["class_count"])
+    unique_signal_count = min(int(evidence["unique_signal_count"]), 4)
+    high_risk_event_type = bool(evidence["high_risk_event_type"])
+    status_indicates_risk = bool(evidence["status_indicates_risk"])
+
+    risk_units = 0
+    risk_units += class_count
+    risk_units += unique_signal_count
+    risk_units += critical_count
+    risk_units += major_count
+    risk_units += int(moderate_count > 0)
+    risk_units += int(weak_count > 0)
+    risk_units += int(high_risk_event_type)
+    risk_units += int(status_indicates_risk)
+    risk_units += int(critical_count > 0)
+    risk_units += int(major_count > 1 or moderate_count > 1)
+
+    return max(0.0, min(risk_units / 10.0, 1.0))
 
 
 def severity_from_score(score: float) -> Severity:
@@ -386,3 +421,7 @@ def safe_int(value: str | int | None) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _contains_any(text: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in text for marker in markers)
