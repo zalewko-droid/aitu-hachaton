@@ -28,6 +28,41 @@ SQLI_MARKERS = (
     "information_schema",
 )
 PATH_TRAVERSAL_MARKERS = ("../", "..%2f", "%2e%2e%2f")
+SUSPICIOUS_PATH_WEIGHTS = {
+    "/.env": 0.22,
+    "/wp-login.php": 0.18,
+    "/phpmyadmin": 0.20,
+    "/etc/passwd": 0.24,
+    "/wp-admin": 0.10,
+    "/admin": 0.08,
+}
+DANGEROUS_RAW_MARKER_WEIGHTS = {
+    "union select": 0.18,
+    "' or ": 0.14,
+    " or 1=1": 0.16,
+    "or%201%3d1": 0.16,
+    "<script>": 0.14,
+    "../": 0.16,
+    "sqlmap": 0.12,
+    "failed password": 0.10,
+    "failed login": 0.10,
+    "authentication failure": 0.10,
+    "forbidden": 0.06,
+    "unauthorized": 0.06,
+    "denied": 0.06,
+    "panic": 0.14,
+    "traceback": 0.14,
+    "exception": 0.10,
+    "restart": 0.08,
+    "kernel": 0.08,
+}
+FALLBACK_ACTIONS = {
+    "web": "investigate",
+    "auth": "review_access",
+    "access": "review_access",
+    "system": "check_system",
+    "general": "monitor",
+}
 
 
 def normalize_log_line(payload: RawLogLineIn) -> NormalizedEvent:
@@ -99,70 +134,136 @@ def normalize_log_line(payload: RawLogLineIn) -> NormalizedEvent:
 def derive_fallback_analysis(event: NormalizedEvent) -> AIAnalysisResult:
     raw_text = event.raw_line.lower()
     path = str(event.normalized_fields.get("path") or "").lower()
-    status_code = event.normalized_fields.get("status_code")
     suspicious_tokens = {str(item).lower() for item in event.normalized_fields.get("suspicious_tokens", [])}
+    score = compute_fallback_score(event)
+    severity = severity_from_score(score)
+    category = default_category_for_event(event.event_type)
 
     if suspicious_tokens.intersection({"sql_injection", "sqlmap"}):
+        category = "web"
         return AIAnalysisResult(
-            score=0.97,
-            severity=Severity.critical,
-            category="web",
+            score=score,
+            severity=severity,
+            category=category,
             explanation="Parser fallback flagged a likely SQL injection pattern in an HTTP request.",
-            recommended_action="investigate the source IP, review WAF behavior, and inspect the targeted endpoint",
+            recommended_action=FALLBACK_ACTIONS[category],
         )
 
     if suspicious_tokens.intersection({"path_traversal"}) or any(marker in path for marker in PATH_TRAVERSAL_MARKERS):
+        category = "web"
         return AIAnalysisResult(
-            score=0.93,
-            severity=Severity.high,
-            category="web",
+            score=score,
+            severity=severity,
+            category=category,
             explanation="Parser fallback detected a path traversal-like request pattern.",
-            recommended_action="inspect the requested path, validate input handling, and review file access logs",
+            recommended_action=FALLBACK_ACTIONS[category],
         )
 
     if event.event_type == "admin_access":
+        category = "web"
         return AIAnalysisResult(
-            score=0.90 if status_code in {401, 403} else 0.82,
-            severity=Severity.high if status_code in {401, 403} else Severity.medium,
-            category="web",
+            score=score,
+            severity=severity,
+            category=category,
             explanation="Parser fallback detected suspicious access to an admin endpoint.",
-            recommended_action="verify whether the request was expected and review access control for admin routes",
+            recommended_action=FALLBACK_ACTIONS[category],
         )
 
     if event.event_type == "failed_login":
+        category = "auth"
         return AIAnalysisResult(
-            score=0.84,
-            severity=Severity.medium if status_code not in {401, 403} else Severity.high,
-            category="auth",
+            score=score,
+            severity=severity,
+            category=category,
             explanation="Parser fallback detected a failed login event with signs of unauthorized access attempts.",
-            recommended_action="review account activity and confirm whether the login attempts were legitimate",
+            recommended_action=FALLBACK_ACTIONS[category],
         )
 
     if event.event_type == "access_denied":
+        category = "access"
         return AIAnalysisResult(
-            score=0.79,
-            severity=Severity.medium,
-            category="access",
+            score=score,
+            severity=severity,
+            category=category,
             explanation="Parser fallback detected a denied access event that may indicate probing or misuse.",
-            recommended_action="review authorization failures and inspect the source host for repeated attempts",
+            recommended_action=FALLBACK_ACTIONS[category],
         )
 
     if event.event_type == "system_anomaly":
+        category = "system"
         return AIAnalysisResult(
-            score=0.72,
-            severity=Severity.medium,
-            category="system",
+            score=score,
+            severity=severity,
+            category=category,
             explanation="Parser fallback detected a system anomaly pattern in the incoming log line.",
-            recommended_action="inspect service health, restart patterns, and recent system changes",
+            recommended_action=FALLBACK_ACTIONS[category],
         )
 
     return AIAnalysisResult(
-        score=0.61,
-        severity=Severity.low,
-        category=default_category_for_event(event.event_type),
+        score=score,
+        severity=severity,
+        category=category,
         explanation="Parser fallback produced a best-effort low-confidence analysis because the AI service was unavailable.",
-        recommended_action="review the normalized event manually if the source appears suspicious",
+        recommended_action=FALLBACK_ACTIONS[category],
     )
+
+
+def compute_fallback_score(event: NormalizedEvent) -> float:
+    score = 0.10
+    raw_text = event.raw_line.lower()
+    path = str(event.normalized_fields.get("path") or "").lower()
+    method = str(event.normalized_fields.get("method") or "").upper()
+    status_code = event.normalized_fields.get("status_code")
+    suspicious_tokens = {str(item).lower() for item in event.normalized_fields.get("suspicious_tokens", [])}
+
+    score += {
+        "http_request": 0.10,
+        "admin_access": 0.22,
+        "failed_login": 0.20,
+        "access_denied": 0.16,
+        "system_anomaly": 0.18,
+        "generic_log": 0.04,
+    }.get(event.event_type, 0.05)
+
+    if status_code in {401, 403}:
+        score += 0.14
+    elif status_code == 404:
+        score += 0.06
+    elif isinstance(status_code, int) and 500 <= status_code <= 599:
+        score += 0.12
+    elif isinstance(status_code, int) and 400 <= status_code <= 499:
+        score += 0.08
+
+    if method == "POST":
+        score += 0.05
+
+    score += 0.34 if "sql_injection" in suspicious_tokens else 0.0
+    score += 0.20 if "sqlmap" in suspicious_tokens else 0.0
+    score += 0.28 if "path_traversal" in suspicious_tokens else 0.0
+    score += 0.08 if "admin_path" in suspicious_tokens else 0.0
+
+    for marker, weight in SUSPICIOUS_PATH_WEIGHTS.items():
+        if marker in path:
+            score += weight
+
+    for marker, weight in DANGEROUS_RAW_MARKER_WEIGHTS.items():
+        if marker in raw_text:
+            score += weight
+
+    if event.event_type == "failed_login" and event.normalized_fields.get("username"):
+        score += 0.05
+
+    return max(0.0, min(score, 1.0))
+
+
+def severity_from_score(score: float) -> Severity:
+    if score >= 0.90:
+        return Severity.critical
+    if score >= 0.70:
+        return Severity.high
+    if score >= 0.45:
+        return Severity.medium
+    return Severity.low
 
 
 def default_category_for_event(event_type: str) -> str:
@@ -182,15 +283,7 @@ def default_explanation_for_event(event: NormalizedEvent) -> str:
 
 
 def default_recommended_action_for_event(event: NormalizedEvent) -> str:
-    if event.event_type in {"http_request", "admin_access"}:
-        return "investigate"
-    if event.event_type == "failed_login":
-        return "review_access"
-    if event.event_type == "access_denied":
-        return "review_access"
-    if event.event_type == "system_anomaly":
-        return "check_system"
-    return "monitor"
+    return FALLBACK_ACTIONS[default_category_for_event(event.event_type)]
 
 
 def infer_source(raw_line: str) -> str:
