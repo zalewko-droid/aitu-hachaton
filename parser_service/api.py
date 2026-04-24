@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
 
 from parser_service.models import ParserHealthResponse, ParserIngestResponse, RawLogLineIn
 from parser_service.service import ParserService
+from app.utils import api_key_matches
 
 
 def create_parser_api(service: ParserService) -> FastAPI:
@@ -21,8 +22,16 @@ def create_parser_api(service: ParserService) -> FastAPI:
         lifespan=lifespan,
     )
 
+    async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
+        if api_key_matches(service.config.shared_api_key, x_api_key):
+            return
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing X-API-Key header.",
+        )
+
     @app.post("/ingest-log-line", response_model=ParserIngestResponse)
-    async def ingest_log_line(payload: RawLogLineIn) -> ParserIngestResponse:
+    async def ingest_log_line(payload: RawLogLineIn, _: None = Depends(require_api_key)) -> ParserIngestResponse:
         return await service.process_log_line(payload)
 
     @app.get("/health", response_model=ParserHealthResponse)

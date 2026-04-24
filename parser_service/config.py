@@ -19,6 +19,7 @@ class ParserConfig:
     request_timeout_seconds: float
     fallback_analysis_enabled: bool
     recent_events_limit: int
+    shared_api_key: str | None = None
     log_level: str = "INFO"
 
 
@@ -41,6 +42,7 @@ def load_parser_config(env_file: str | None = None) -> ParserConfig:
         default=True,
     )
     recent_events_limit = int(os.getenv("PARSER_RECENT_EVENTS_LIMIT", "100"))
+    shared_api_key = _env_value("SHARED_API_KEY", default="") or None
     log_level = _env_value("PARSER_LOG_LEVEL", "LOG_LEVEL", default="INFO")
 
     if not ai_service_url:
@@ -56,6 +58,7 @@ def load_parser_config(env_file: str | None = None) -> ParserConfig:
         request_timeout_seconds=request_timeout_seconds,
         fallback_analysis_enabled=fallback_analysis_enabled,
         recent_events_limit=recent_events_limit,
+        shared_api_key=shared_api_key,
         log_level=log_level,
     )
 

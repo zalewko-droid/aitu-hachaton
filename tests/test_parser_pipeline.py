@@ -21,21 +21,26 @@ async def test_parser_service_forwards_to_ai_and_main_api() -> None:
         payload = await request.json()
         assert payload["event_type"] == "admin_access"
         state["analyze_calls"] += 1
-        return web.json_response(
+        return web.Response(
+            text="""```json
             {
-                "score": 0.91,
-                "severity": "high",
-                "category": "web",
-                "explanation": "AI said suspicious admin probing.",
-                "recommended_action": "investigate",
+              "score": "91%",
+              "severity": "HIGH",
+              "category": "HTTP",
+              "explanation": "AI said suspicious admin probing.",
+              "recommended_action": "review access permissions"
             }
+            ```""",
+            content_type="text/plain",
         )
 
     async def ingest_alert(request: web.Request) -> web.Response:
+        assert request.headers["X-API-Key"] == "team-secret"
         state["alerts"].append(await request.json())
         return web.json_response({"status": "accepted"})
 
     async def heartbeat_parser(request: web.Request) -> web.Response:
+        assert request.headers["X-API-Key"] == "team-secret"
         state["heartbeats"].append(await request.json())
         return web.json_response({"status": "ok"})
 
@@ -64,10 +69,11 @@ async def test_parser_service_forwards_to_ai_and_main_api() -> None:
         request_timeout_seconds=5.0,
         fallback_analysis_enabled=True,
         recent_events_limit=100,
+        shared_api_key="team-secret",
         log_level="INFO",
     )
 
-    client = ParserHttpClient(timeout_seconds=5.0)
+    client = ParserHttpClient(timeout_seconds=5.0, shared_api_key=config.shared_api_key)
     service = ParserService(config=config, client=client)
 
     try:
@@ -93,3 +99,4 @@ async def test_parser_service_forwards_to_ai_and_main_api() -> None:
     assert state["alerts"][0]["severity"] == "high"
     assert state["alerts"][0]["source_ip"] == "192.168.43.25"
     assert state["alerts"][0]["category"] == "web"
+    assert state["alerts"][0]["recommended_action"] == "review_access"

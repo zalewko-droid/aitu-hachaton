@@ -17,6 +17,7 @@ class AppConfig:
     sqlite_path: str
     demo_mode_default: bool
     heartbeat_stale_seconds: int
+    shared_api_key: str | None = None
     log_level: str = "INFO"
 
     @property
@@ -42,6 +43,7 @@ def load_config(env_file: str | None = None) -> AppConfig:
     heartbeat_stale_seconds = int(
         _env_value("MAIN_HEARTBEAT_STALE_SECONDS", "HEARTBEAT_STALE_SECONDS", default="60")
     )
+    shared_api_key = _env_value("SHARED_API_KEY", default="") or None
     log_level = _env_value("MAIN_LOG_LEVEL", "LOG_LEVEL", default="INFO")
 
     return AppConfig(
@@ -52,6 +54,7 @@ def load_config(env_file: str | None = None) -> AppConfig:
         sqlite_path=sqlite_path,
         demo_mode_default=demo_mode_default,
         heartbeat_stale_seconds=heartbeat_stale_seconds,
+        shared_api_key=shared_api_key,
         log_level=log_level,
     )
 

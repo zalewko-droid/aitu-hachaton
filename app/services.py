@@ -18,7 +18,7 @@ from app.models import (
     StatusSnapshot,
 )
 from app.storage import SQLiteStorage
-from app.utils import bool_from_text, bool_to_text
+from app.utils import bool_from_text, bool_to_text, is_api_key_configured
 
 if TYPE_CHECKING:
     from app.demo import DemoController
@@ -147,12 +147,16 @@ class ApplicationService:
             "status": "ok",
             "bot_status": snapshot.bot_status.value,
             "api_status": snapshot.api_status.value,
+            "parser_status": snapshot.parser.status.value,
+            "detector_status": snapshot.detector.status.value,
             "parser": snapshot.parser.model_dump(mode="json"),
             "detector": snapshot.detector.model_dump(mode="json"),
             "total_alerts": snapshot.total_alerts,
             "high_severity_alerts": snapshot.high_severity_alerts,
             "last_alert_timestamp": snapshot.last_alert_timestamp,
             "demo_mode": snapshot.demo_mode,
+            "heartbeat_stale_seconds": self.config.heartbeat_stale_seconds,
+            "api_key_enabled": is_api_key_configured(self.config.shared_api_key),
         }
 
     async def set_demo_mode(self, enabled: bool) -> bool:

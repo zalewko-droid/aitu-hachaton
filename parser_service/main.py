@@ -20,7 +20,10 @@ async def run() -> None:
     config = load_parser_config()
     configure_logging(config.log_level)
 
-    client = ParserHttpClient(timeout_seconds=config.request_timeout_seconds)
+    client = ParserHttpClient(
+        timeout_seconds=config.request_timeout_seconds,
+        shared_api_key=config.shared_api_key,
+    )
     service = ParserService(config=config, client=client)
     api = create_parser_api(service)
     server = uvicorn.Server(

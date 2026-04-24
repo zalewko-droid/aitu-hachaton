@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from app.models import AlertIn
+from app.utils import is_api_key_configured
 from parser_service.config import ParserConfig
 from parser_service.forwarder import ParserHttpClient
 from parser_service.models import AIAnalysisResult, ParserHealthResponse, ParserIngestResponse, RawLogLineIn
@@ -31,6 +32,9 @@ class ParserRuntimeStats:
     last_received_at: datetime | None = None
     last_processed_at: datetime | None = None
     last_alert_id: str | None = None
+    last_ai_error: str | None = None
+    last_alert_delivery_error: str | None = None
+    last_heartbeat_error: str | None = None
     last_error: str | None = None
 
 
@@ -63,25 +67,42 @@ class ParserService:
         payload = self._enrich_payload(payload)
         normalized_event = normalize_log_line(payload)
         self._recent_events.appendleft(normalized_event)
+        logger.info(
+            "Accepted raw log %s from source=%s ip=%s event_type=%s",
+            normalized_event.id,
+            normalized_event.source,
+            normalized_event.source_ip or "unknown",
+            normalized_event.event_type,
+        )
 
         errors: list[str] = []
         analysis_source = "ai"
         ai_forwarded = False
+        self.stats.last_ai_error = None
+        self.stats.last_alert_delivery_error = None
 
         analysis, ai_error = await self.client.analyze_event(self.config.ai_service_url, normalized_event)
         if analysis is not None:
             ai_forwarded = True
             self.stats.total_ai_success += 1
+            logger.info(
+                "AI analysis succeeded for %s with severity=%s score=%.2f",
+                normalized_event.id,
+                analysis.severity.value,
+                analysis.score,
+            )
         elif self.config.fallback_analysis_enabled:
             analysis = derive_fallback_analysis(normalized_event)
             analysis_source = "fallback"
             self.stats.total_fallback_analysis += 1
             if ai_error is not None:
+                self.stats.last_ai_error = ai_error
                 errors.append(ai_error)
                 logger.warning("AI service unavailable, using parser fallback analysis: %s", ai_error)
         else:
             analysis_source = "none"
             if ai_error is not None:
+                self.stats.last_ai_error = ai_error
                 errors.append(ai_error)
                 logger.warning("AI service unavailable and fallback disabled: %s", ai_error)
 
@@ -108,7 +129,9 @@ class ParserService:
         if alert_forwarded:
             self.stats.total_alerts_forwarded += 1
             self.stats.last_alert_id = final_alert.id
+            logger.info("Forwarded final alert %s to main API", final_alert.id)
         elif alert_error is not None:
+            self.stats.last_alert_delivery_error = alert_error
             errors.append(alert_error)
             logger.warning("Failed to forward final alert to main API: %s", alert_error)
 
@@ -145,6 +168,7 @@ class ParserService:
             network_server_name=self.config.network_server_name,
             heartbeat_interval_seconds=self.config.heartbeat_interval_seconds,
             fallback_analysis_enabled=self.config.fallback_analysis_enabled,
+            api_key_enabled=is_api_key_configured(self.config.shared_api_key),
             total_received=self.stats.total_received,
             total_ai_success=self.stats.total_ai_success,
             total_fallback_analysis=self.stats.total_fallback_analysis,
@@ -153,6 +177,9 @@ class ParserService:
             last_received_at=self.stats.last_received_at,
             last_processed_at=self.stats.last_processed_at,
             last_alert_id=self.stats.last_alert_id,
+            last_ai_error=self.stats.last_ai_error,
+            last_alert_delivery_error=self.stats.last_alert_delivery_error,
+            last_heartbeat_error=self.stats.last_heartbeat_error,
             last_error=self.stats.last_error,
         )
 
@@ -169,8 +196,11 @@ class ParserService:
     async def _safe_send_heartbeat(self, status: str) -> None:
         ok, error = await self.client.send_parser_heartbeat(self.config.main_api_url, status=status)
         if not ok and error is not None:
+            self.stats.last_heartbeat_error = error
             self.stats.last_error = error
             logger.warning("Parser heartbeat failed: %s", error)
+        else:
+            self.stats.last_heartbeat_error = None
 
     def _enrich_payload(self, payload: RawLogLineIn) -> RawLogLineIn:
         metadata = dict(payload.metadata)

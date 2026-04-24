@@ -7,12 +7,14 @@ import aiohttp
 from pydantic import ValidationError
 
 from parser_service.models import AIAnalysisResult, NormalizedEvent
+from app.utils import build_api_headers
 
 
 class ParserHttpClient:
-    def __init__(self, timeout_seconds: float) -> None:
+    def __init__(self, timeout_seconds: float, shared_api_key: str | None = None) -> None:
         self._timeout = aiohttp.ClientTimeout(total=timeout_seconds)
         self._session: aiohttp.ClientSession | None = None
+        self._shared_api_key = shared_api_key
 
     async def open(self) -> None:
         if self._session is None or self._session.closed:
@@ -28,12 +30,16 @@ class ParserHttpClient:
             return None, error
 
         try:
-            return AIAnalysisResult.model_validate(response_data or {}), None
-        except ValidationError as exc:
+            return AIAnalysisResult.from_ai_payload(response_data or {}), None
+        except (ValidationError, ValueError, TypeError) as exc:
             return None, f"AI response validation failed: {exc}"
 
     async def send_alert(self, main_api_url: str, payload: dict[str, object]) -> tuple[bool, str | None]:
-        _, error = await self._post_json(f"{main_api_url}/ingest-alert", payload)
+        _, error = await self._post_json(
+            f"{main_api_url}/ingest-alert",
+            payload,
+            headers=build_api_headers(self._shared_api_key),
+        )
         if error is not None:
             return False, error
         return True, None
@@ -44,26 +50,33 @@ class ParserHttpClient:
             "timestamp": datetime.now().replace(microsecond=0).isoformat(),
             "status": status,
         }
-        _, error = await self._post_json(f"{main_api_url}/heartbeat/parser", payload)
+        _, error = await self._post_json(
+            f"{main_api_url}/heartbeat/parser",
+            payload,
+            headers=build_api_headers(self._shared_api_key),
+        )
         if error is not None:
             return False, error
         return True, None
 
-    async def _post_json(self, url: str, payload: dict[str, object]) -> tuple[dict[str, object] | None, str | None]:
+    async def _post_json(
+        self,
+        url: str,
+        payload: dict[str, object],
+        headers: dict[str, str] | None = None,
+    ) -> tuple[object | None, str | None]:
         if self._session is None or self._session.closed:
             await self.open()
 
         assert self._session is not None
 
         try:
-            async with self._session.post(url, json=payload) as response:
+            async with self._session.post(url, json=payload, headers=headers) as response:
                 text = await response.text()
-                data: dict[str, object] | None = None
+                data: object | None = None
                 if text:
                     try:
-                        parsed = json.loads(text)
-                        if isinstance(parsed, dict):
-                            data = parsed
+                        data = json.loads(text)
                     except json.JSONDecodeError:
                         data = {"raw_text": text}
 

@@ -65,6 +65,7 @@ def test_parser_api_endpoints_work_and_use_recent_events() -> None:
         assert health.status_code == 200
         assert health.json()["status"] == "ok"
         assert health.json()["network_server_name"] == "victim-laptop"
+        assert health.json()["api_key_enabled"] is False
 
         ingest = client.post(
             "/ingest-log-line",
@@ -87,3 +88,43 @@ def test_parser_api_endpoints_work_and_use_recent_events() -> None:
     assert client_stub.closed is True
     assert len(client_stub.sent_alerts) == 1
     assert len(client_stub.heartbeats) >= 2
+
+
+def test_parser_api_optional_api_key_protection() -> None:
+    config = ParserConfig(
+        parser_host="0.0.0.0",
+        parser_port=9001,
+        main_api_url="http://127.0.0.1:8000",
+        ai_service_url="http://192.168.1.50:9000/analyze",
+        network_server_name="victim-laptop",
+        heartbeat_interval_seconds=12,
+        request_timeout_seconds=5.0,
+        fallback_analysis_enabled=True,
+        recent_events_limit=100,
+        shared_api_key="team-secret",
+        log_level="INFO",
+    )
+    client_stub = FakeParserClient()
+    service = ParserService(config=config, client=client_stub)  # type: ignore[arg-type]
+    app = create_parser_api(service)
+
+    with TestClient(app) as client:
+        blocked = client.post(
+            "/ingest-log-line",
+            json={
+                "source": "nginx",
+                "raw_line": '192.168.43.25 - - [24/Apr/2026:14:21:03 +0500] "GET /admin/login HTTP/1.1" 403 512',
+            },
+        )
+        assert blocked.status_code == 401
+
+        allowed = client.post(
+            "/ingest-log-line",
+            headers={"X-API-Key": "team-secret"},
+            json={
+                "source": "nginx",
+                "raw_line": '192.168.43.25 - - [24/Apr/2026:14:21:03 +0500] "GET /admin/login HTTP/1.1" 403 512',
+            },
+        )
+        assert allowed.status_code == 200
+        assert allowed.json()["status"] == "processed"

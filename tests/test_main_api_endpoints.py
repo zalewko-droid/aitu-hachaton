@@ -39,6 +39,9 @@ def test_main_api_endpoints_work_with_shared_service_state(tmp_path) -> None:
         health = client.get("/health")
         assert health.status_code == 200
         assert health.json()["status"] == "ok"
+        assert health.json()["parser_status"] == "unknown"
+        assert health.json()["detector_status"] == "unknown"
+        assert health.json()["api_key_enabled"] is False
 
         parser_heartbeat = client.post(
             "/heartbeat/parser",
@@ -95,8 +98,51 @@ def test_main_api_endpoints_work_with_shared_service_state(tmp_path) -> None:
         assert health_after.status_code == 200
         data = health_after.json()
         assert data["total_alerts"] == 1
+        assert data["parser_status"] == "online"
+        assert data["detector_status"] == "online"
         assert data["parser"]["status"] == "online"
         assert data["detector"]["status"] == "online"
 
     assert len(bot.messages) == 1
 
+
+def test_main_api_optional_api_key_protection(tmp_path) -> None:
+    config = AppConfig(
+        bot_token="test-token",
+        admin_chat_id=123456789,
+        api_host="0.0.0.0",
+        api_port=8000,
+        sqlite_path=str(tmp_path / "alerts.db"),
+        demo_mode_default=False,
+        heartbeat_stale_seconds=60,
+        shared_api_key="team-secret",
+        log_level="INFO",
+    )
+    storage = SQLiteStorage(config.sqlite_path)
+    bot = FakeBot()
+    service = ApplicationService(config=config, storage=storage, bot=bot)  # type: ignore[arg-type]
+    asyncio.run(service.initialize())
+    app = create_api(service)
+
+    with TestClient(app) as client:
+        blocked = client.post(
+            "/heartbeat/detector",
+            json={
+                "service": "detector",
+                "timestamp": datetime.now().replace(microsecond=0).isoformat(),
+                "status": "online",
+            },
+        )
+        assert blocked.status_code == 401
+
+        allowed = client.post(
+            "/heartbeat/detector",
+            headers={"X-API-Key": "team-secret"},
+            json={
+                "service": "detector",
+                "timestamp": datetime.now().replace(microsecond=0).isoformat(),
+                "status": "online",
+            },
+        )
+        assert allowed.status_code == 200
+        assert allowed.json()["service"] == "detector"

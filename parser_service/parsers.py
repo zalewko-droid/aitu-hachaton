@@ -183,14 +183,14 @@ def default_explanation_for_event(event: NormalizedEvent) -> str:
 
 def default_recommended_action_for_event(event: NormalizedEvent) -> str:
     if event.event_type in {"http_request", "admin_access"}:
-        return "investigate the request path and validate the source IP"
+        return "investigate"
     if event.event_type == "failed_login":
-        return "review authentication attempts for the affected account"
+        return "review_access"
     if event.event_type == "access_denied":
-        return "inspect repeated authorization failures from the source"
+        return "review_access"
     if event.event_type == "system_anomaly":
-        return "review system logs and recent service activity"
-    return "inspect the raw event manually"
+        return "check_system"
+    return "monitor"
 
 
 def infer_source(raw_line: str) -> str:

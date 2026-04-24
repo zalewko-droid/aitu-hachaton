@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
 
 from app.models import AlertIn, HeartbeatPayload, IngestResult
 from app.services import ApplicationService
+from app.utils import api_key_matches
 
 
 def create_api(service: ApplicationService) -> FastAPI:
@@ -21,19 +22,27 @@ def create_api(service: ApplicationService) -> FastAPI:
         lifespan=lifespan,
     )
 
+    async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
+        if api_key_matches(service.config.shared_api_key, x_api_key):
+            return
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing X-API-Key header.",
+        )
+
     @app.post("/ingest-alert", response_model=IngestResult)
-    async def ingest_alert(alert: AlertIn) -> IngestResult:
+    async def ingest_alert(alert: AlertIn, _: None = Depends(require_api_key)) -> IngestResult:
         return await service.ingest_alert(alert)
 
     @app.post("/heartbeat/parser")
-    async def parser_heartbeat(payload: HeartbeatPayload) -> dict[str, object]:
+    async def parser_heartbeat(payload: HeartbeatPayload, _: None = Depends(require_api_key)) -> dict[str, object]:
         if payload.service.value != "parser":
             raise HTTPException(status_code=400, detail="Payload service must be 'parser' for this endpoint.")
         await service.update_heartbeat(payload)
         return {"status": "ok", "service": "parser", "timestamp": payload.timestamp}
 
     @app.post("/heartbeat/detector")
-    async def detector_heartbeat(payload: HeartbeatPayload) -> dict[str, object]:
+    async def detector_heartbeat(payload: HeartbeatPayload, _: None = Depends(require_api_key)) -> dict[str, object]:
         if payload.service.value != "detector":
             raise HTTPException(status_code=400, detail="Payload service must be 'detector' for this endpoint.")
         await service.update_heartbeat(payload)

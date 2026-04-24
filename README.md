@@ -4,6 +4,7 @@ This repository contains one hackathon-ready system with two runnable Python pro
 
 - main service: Telegram bot UI + analyzed alert API + SQLite storage
 - parser service: raw log ingestion + normalization + AI forwarding + heartbeat
+- optional shared `X-API-Key` protection for inter-service write calls
 
 Telegram remains the only user-facing UI.
 
@@ -48,9 +49,14 @@ The parser also sends heartbeat updates to the main API at `POST /heartbeat/pars
 |   |-- parsers.py
 |   `-- service.py
 |-- tests/
+|   |-- test_ai_response_normalization.py
 |   |-- test_config_integration.py
 |   |-- test_formatter.py
+|   |-- test_main_api_endpoints.py
 |   |-- test_models.py
+|   |-- test_parser_api_endpoints.py
+|   |-- test_parser_fallback.py
+|   |-- test_parser_pipeline.py
 |   |-- test_parser_service.py
 |   `-- test_storage.py
 |-- .env.example
@@ -90,6 +96,7 @@ PARSER_HEARTBEAT_INTERVAL_SECONDS=12
 AI_ANALYZE_URL=http://<AI_IP>:9000/analyze
 
 NETWORK_SERVER_NAME=victim-laptop
+SHARED_API_KEY=
 ```
 
 Notes:
@@ -98,6 +105,8 @@ Notes:
 - `PARSER_HOST=0.0.0.0` makes the parser reachable from the victim server laptop.
 - The parser derives its internal main API base URL from `MAIN_API_HOST` and `MAIN_API_PORT`.
 - If `MAIN_API_HOST` is `0.0.0.0`, the parser safely uses loopback internally for same-laptop calls while the server still binds on all interfaces.
+- Leave `SHARED_API_KEY` empty to keep the current open hackathon flow.
+- If `SHARED_API_KEY` is set, clients must send `X-API-Key: <value>` to parser and main write endpoints.
 
 ## Main Service
 
@@ -146,6 +155,8 @@ Endpoints:
 Reliability behavior:
 
 - malformed log lines are normalized best-effort
+- AI responses can be plain JSON or JSON wrapped in markdown code fences
+- weird AI values are normalized before alert creation: score is clamped, severity/category/action are sanitized
 - AI forwarding failures do not crash the parser
 - heartbeat failures do not crash the parser
 - if AI is unavailable, parser falls back to a simple heuristic analysis so the demo remains usable
@@ -216,6 +227,13 @@ Optional fields:
 }
 ```
 
+The parser is also tolerant to:
+
+- JSON inside markdown fences like ```` ```json ... ``` ````
+- string scores like `"91%"`
+- mixed-case values like `"HIGH"` or `"HTTP"`
+- nested wrappers such as `{ "result": { ... } }`
+
 ### Final analyzed alert into main API
 
 `POST /ingest-alert`
@@ -265,6 +283,7 @@ pip install -r requirements.txt
    - Telegram admin chat ID
    - AI laptop IP in `AI_ANALYZE_URL`
    - any hostname label you want in `NETWORK_SERVER_NAME`
+   - optional `SHARED_API_KEY` if you want header protection
 
 ## Run Commands
 
@@ -293,6 +312,8 @@ That still resolves the same root `.env`.
 
 If you are using PowerShell on Windows, prefer `curl.exe`.
 
+If `SHARED_API_KEY` is enabled, add `-H "X-API-Key: <your_key>"` to the write requests below.
+
 ### POST `/ingest-log-line`
 
 ```bash
@@ -314,6 +335,20 @@ curl -X POST http://127.0.0.1:8000/heartbeat/parser \
   -H "Content-Type: application/json" \
   -d '{
     "service": "parser",
+    "timestamp": "2026-04-24T14:21:03",
+    "status": "online"
+  }'
+```
+
+### POST `/heartbeat/detector`
+
+This is the endpoint the external AI service should call to keep detector status fresh on the main service.
+
+```bash
+curl -X POST http://127.0.0.1:8000/heartbeat/detector \
+  -H "Content-Type: application/json" \
+  -d '{
+    "service": "detector",
     "timestamp": "2026-04-24T14:21:03",
     "status": "online"
   }'
@@ -354,9 +389,35 @@ curl.exe -X POST http://127.0.0.1:8000/heartbeat/parser `
 ```
 
 ```powershell
+curl.exe -X POST http://127.0.0.1:8000/heartbeat/detector `
+  -H "Content-Type: application/json" `
+  -d "{\"service\":\"detector\",\"timestamp\":\"2026-04-24T14:21:03\",\"status\":\"online\"}"
+```
+
+```powershell
 curl.exe -X POST http://127.0.0.1:8000/ingest-alert `
   -H "Content-Type: application/json" `
   -d "{\"id\":\"evt_00124\",\"timestamp\":\"2026-04-24T14:21:03\",\"source\":\"nginx\",\"source_ip\":\"192.168.43.25\",\"event_type\":\"http_request\",\"raw_line\":\"GET /admin/login HTTP/1.1 ...\",\"score\":0.91,\"severity\":\"high\",\"category\":\"web\",\"explanation\":\"Repeated suspicious requests with SQL injection patterns and denied responses.\",\"recommended_action\":\"investigate\"}"
+```
+
+### Minimal detector heartbeat helper
+
+The external AI laptop can use any HTTP client. A minimal Python example is:
+
+```python
+from datetime import datetime
+import httpx
+
+with httpx.Client(timeout=5.0) as client:
+    client.post(
+        "http://<MAIN_LAPTOP_IP>:8000/heartbeat/detector",
+        headers={"X-API-Key": "<shared_key_if_enabled>"},
+        json={
+            "service": "detector",
+            "timestamp": datetime.now().replace(microsecond=0).isoformat(),
+            "status": "online",
+        },
+    )
 ```
 
 ## Demo Flow
@@ -372,7 +433,7 @@ curl.exe -X POST http://127.0.0.1:8000/ingest-alert `
 ## Tests
 
 ```bash
-pytest
+python -m pytest
 ```
 
 ## Notes
@@ -381,3 +442,5 @@ pytest
 - The existing `/ingest-alert` contract is preserved.
 - Duplicate alert IDs remain safe because the main storage layer already ignores duplicates.
 - Both services now use one shared root `.env`.
+- Main `/health` exposes parser and detector status clearly at both top level and nested detail.
+- Parser `/health` exposes the latest AI, heartbeat, and alert-delivery error when one of those steps fails.
