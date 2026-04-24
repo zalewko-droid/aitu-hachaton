@@ -60,6 +60,7 @@ class ParserService:
         self.stats.total_received += 1
         self.stats.last_received_at = datetime.now().replace(microsecond=0)
 
+        payload = self._enrich_payload(payload)
         normalized_event = normalize_log_line(payload)
         self._recent_events.appendleft(normalized_event)
 
@@ -141,6 +142,7 @@ class ParserService:
             parser_port=self.config.parser_port,
             main_api_url=self.config.main_api_url,
             ai_service_url=self.config.ai_service_url,
+            network_server_name=self.config.network_server_name,
             heartbeat_interval_seconds=self.config.heartbeat_interval_seconds,
             fallback_analysis_enabled=self.config.fallback_analysis_enabled,
             total_received=self.stats.total_received,
@@ -169,6 +171,11 @@ class ParserService:
         if not ok and error is not None:
             self.stats.last_error = error
             logger.warning("Parser heartbeat failed: %s", error)
+
+    def _enrich_payload(self, payload: RawLogLineIn) -> RawLogLineIn:
+        metadata = dict(payload.metadata)
+        metadata.setdefault("hostname", self.config.network_server_name)
+        return payload.model_copy(update={"metadata": metadata})
 
 
 def build_final_alert(normalized_event, analysis: AIAnalysisResult) -> AlertIn:

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+from pathlib import Path
 
 import uvicorn
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.utils import configure_logging
 from parser_service.api import create_parser_api

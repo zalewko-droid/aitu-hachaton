@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Any
+
+from dotenv import load_dotenv
 
 
 def configure_logging(level: str = "INFO") -> None:
@@ -10,6 +13,36 @@ def configure_logging(level: str = "INFO") -> None:
         level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
+
+
+def get_repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def load_root_dotenv(env_file: str | Path | None = None) -> Path:
+    if env_file is None:
+        path = get_repo_root() / ".env"
+    else:
+        path = Path(env_file).expanduser()
+        if not path.is_absolute():
+            path = get_repo_root() / path
+    path = path.resolve()
+    load_dotenv(path)
+    return path
+
+
+def resolve_repo_path(path_text: str) -> Path:
+    path = Path(path_text).expanduser()
+    if path.is_absolute():
+        return path
+    return (get_repo_root() / path).resolve()
+
+
+def derive_internal_url(host: str, port: int) -> str:
+    normalized_host = host.strip() or "127.0.0.1"
+    if normalized_host in {"0.0.0.0", "::", "[::]"}:
+        normalized_host = "127.0.0.1"
+    return f"http://{normalized_host}:{port}"
 
 
 def parse_datetime(value: datetime | str | None) -> datetime | None:

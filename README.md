@@ -1,29 +1,26 @@
 # AI-Powered Log Anomaly Detector MVP
 
-This repository now contains two cleanly separated services for hackathon case #14:
+This repository contains one hackathon-ready system with two runnable Python processes and one shared root `.env` file:
 
-- `app/`: the main Telegram bot UI and analyzed-alert API
-- `parser_service/`: the raw log parser service that sits in front of the AI laptop
+- main service: Telegram bot UI + analyzed alert API + SQLite storage
+- parser service: raw log ingestion + normalization + AI forwarding + heartbeat
 
 Telegram remains the only user-facing UI.
 
 ## Architecture
 
-The intended pipeline is:
+The pipeline is:
 
-1. Victim server laptop sends raw log lines to the parser service on your laptop.
-2. Parser service normalizes each raw log line into a structured event.
-3. Parser service forwards the normalized event to the AI service on another laptop.
-4. AI service returns `score`, `severity`, `category`, `explanation`, and `recommended_action`.
-5. Parser service sends the final analyzed alert to the existing main API `/ingest-alert`.
-6. Main bot/API stores the alert and sends the Telegram notification.
+1. Victim server laptop sends raw log lines to the parser service.
+2. Parser service receives `POST /ingest-log-line`.
+3. Parser normalizes the raw log line into a structured event.
+4. Parser forwards that normalized event to the AI laptop at `AI_ANALYZE_URL`.
+5. AI returns `score`, `severity`, `category`, `explanation`, and `recommended_action`.
+6. Parser converts that response into the existing analyzed-alert contract.
+7. Parser posts the final analyzed alert to the main API `POST /ingest-alert`.
+8. Main service stores the alert and sends the Telegram notification.
 
-Network layout:
-
-- Main bot/API binds to `API_HOST` and `API_PORT`, usually `0.0.0.0:8000`
-- Parser service binds to `PARSER_HOST` and `PARSER_PORT`, usually `0.0.0.0:9001`
-- Parser calls the AI laptop at `PARSER_AI_URL`
-- Parser sends heartbeat to `PARSER_MAIN_API_URL/heartbeat/parser`
+The parser also sends heartbeat updates to the main API at `POST /heartbeat/parser`.
 
 ## Repository Structure
 
@@ -43,7 +40,6 @@ Network layout:
 |   `-- utils.py
 |-- parser_service/
 |   |-- __init__.py
-|   |-- .env.example
 |   |-- api.py
 |   |-- config.py
 |   |-- forwarder.py
@@ -52,6 +48,7 @@ Network layout:
 |   |-- parsers.py
 |   `-- service.py
 |-- tests/
+|   |-- test_config_integration.py
 |   |-- test_formatter.py
 |   |-- test_models.py
 |   |-- test_parser_service.py
@@ -63,9 +60,48 @@ Network layout:
 `-- README.md
 ```
 
-## Main Service Features
+## One Root `.env`
 
-The main bot/API service still owns:
+This project uses exactly one shared `.env` at the repository root.
+
+- main service reads the root `.env`
+- parser service reads the same root `.env`
+- parser config is resolved from the repository root even if the parser is started from inside `parser_service/`
+
+Use this root layout:
+
+```dotenv
+BOT_TOKEN=
+ADMIN_CHAT_ID=
+
+MAIN_API_HOST=0.0.0.0
+MAIN_API_PORT=8000
+MAIN_SQLITE_PATH=alerts.db
+MAIN_DEMO_MODE_DEFAULT=false
+MAIN_HEARTBEAT_STALE_SECONDS=60
+MAIN_LOG_LEVEL=INFO
+
+PARSER_HOST=0.0.0.0
+PARSER_PORT=9001
+PARSER_LOG_LEVEL=INFO
+PARSER_HTTP_TIMEOUT_SECONDS=5
+PARSER_HEARTBEAT_INTERVAL_SECONDS=12
+
+AI_ANALYZE_URL=http://<AI_IP>:9000/analyze
+
+NETWORK_SERVER_NAME=victim-laptop
+```
+
+Notes:
+
+- `MAIN_API_HOST=0.0.0.0` makes the main service reachable from other laptops.
+- `PARSER_HOST=0.0.0.0` makes the parser reachable from the victim server laptop.
+- The parser derives its internal main API base URL from `MAIN_API_HOST` and `MAIN_API_PORT`.
+- If `MAIN_API_HOST` is `0.0.0.0`, the parser safely uses loopback internally for same-laptop calls while the server still binds on all interfaces.
+
+## Main Service
+
+Responsibilities:
 
 - Telegram bot commands:
   - `/start`
@@ -78,10 +114,10 @@ The main bot/API service still owns:
   - `/demo_off`
 - analyzed alert ingestion
 - SQLite persistence
-- parser and detector heartbeat tracking
-- demo mode for jury demos
+- parser/detector heartbeat tracking
+- demo mode
 
-Main API endpoints:
+Endpoints:
 
 - `POST /ingest-alert`
 - `POST /heartbeat/parser`
@@ -89,29 +125,34 @@ Main API endpoints:
 - `GET /health`
 - `GET /recent-alerts`
 
-## Parser Service Features
+## Parser Service
 
-The parser service is kept separate from the bot and exposes:
+Responsibilities:
+
+- receive raw logs over HTTP
+- normalize log lines into structured events
+- forward normalized events to the AI laptop
+- convert AI output into the existing `AlertIn` payload
+- send final analyzed alerts to the main API
+- send parser heartbeat to the main API
+- keep working even if raw logs are malformed or AI is temporarily down
+
+Endpoints:
 
 - `POST /ingest-log-line`
 - `GET /health`
 - `GET /recent-events`
 
-Behavior of `POST /ingest-log-line`:
+Reliability behavior:
 
-- accepts a raw log line payload over HTTP
-- performs best-effort normalization even for malformed lines
-- extracts fields like `source_ip`, `event_type`, HTTP path, method, and status code when available
-- forwards the normalized event to the AI service
-- sends the final analyzed alert to the existing main API `/ingest-alert`
-- logs failures instead of crashing
-- falls back to a simple parser-side heuristic analysis if the AI service is unavailable
-
-The fallback analysis is intentionally simple and only exists to keep the demo stable if the AI laptop is unreachable.
+- malformed log lines are normalized best-effort
+- AI forwarding failures do not crash the parser
+- heartbeat failures do not crash the parser
+- if AI is unavailable, parser falls back to a simple heuristic analysis so the demo remains usable
 
 ## Data Contracts
 
-### 1. Raw log line to parser
+### Raw log line into parser
 
 `POST /ingest-log-line`
 
@@ -127,11 +168,15 @@ The fallback analysis is intentionally simple and only exists to keep the demo s
 }
 ```
 
-`id`, `timestamp`, `source`, and `source_ip` are optional. The parser will generate or infer them when possible.
+Optional fields:
 
-### 2. Normalized event sent from parser to AI service
+- `id`
+- `timestamp`
+- `source`
+- `source_ip`
+- `metadata`
 
-The parser forwards a normalized event shaped like:
+### Normalized event from parser to AI
 
 ```json
 {
@@ -148,7 +193,10 @@ The parser forwards a normalized event shaped like:
     "response_bytes": 512,
     "suspicious_tokens": [
       "admin_path"
-    ]
+    ],
+    "metadata": {
+      "hostname": "victim-laptop"
+    }
   },
   "metadata": {
     "hostname": "victim-laptop"
@@ -156,11 +204,7 @@ The parser forwards a normalized event shaped like:
 }
 ```
 
-Recommended AI endpoint:
-
-- `POST http://<AI_IP>:9000/analyze`
-
-Expected AI response:
+### AI response expected by parser
 
 ```json
 {
@@ -172,7 +216,7 @@ Expected AI response:
 }
 ```
 
-### 3. Final analyzed alert sent to main API
+### Final analyzed alert into main API
 
 `POST /ingest-alert`
 
@@ -192,11 +236,11 @@ Expected AI response:
 }
 ```
 
-This contract is unchanged from the existing bot/API layer.
+This analyzed-alert contract is unchanged.
 
-### 4. Heartbeat payload
+### Parser heartbeat payload
 
-`POST /heartbeat/parser` or `POST /heartbeat/detector`
+`POST /heartbeat/parser`
 
 ```json
 {
@@ -205,8 +249,6 @@ This contract is unchanged from the existing bot/API layer.
   "status": "online"
 }
 ```
-
-The parser service sends this heartbeat automatically in the background to the main API.
 
 ## Setup
 
@@ -218,69 +260,40 @@ pip install -r requirements.txt
 ```
 
 3. Copy `.env.example` to `.env`.
-4. Fill in your Telegram bot token, admin chat ID, and laptop IPs.
-
-## Environment Variables
-
-Main bot/API:
-
-- `BOT_TOKEN`
-- `ADMIN_CHAT_ID`
-- `API_HOST`
-- `API_PORT`
-- `SQLITE_PATH`
-- `DEMO_MODE_DEFAULT`
-- `HEARTBEAT_STALE_SECONDS`
-- `LOG_LEVEL`
-
-Parser service:
-
-- `PARSER_HOST`
-- `PARSER_PORT`
-- `PARSER_MAIN_API_URL`
-- `PARSER_AI_URL`
-- `PARSER_HEARTBEAT_INTERVAL_SECONDS`
-- `PARSER_REQUEST_TIMEOUT_SECONDS`
-- `PARSER_FALLBACK_ANALYSIS_ENABLED`
-- `PARSER_RECENT_EVENTS_LIMIT`
-
-Recommended hotspot-friendly values:
-
-- `API_HOST=0.0.0.0`
-- `PARSER_HOST=0.0.0.0`
-
-When another laptop needs to reach one of these services, use your laptop's hotspot IP in the request URL, not `127.0.0.1`.
+4. Fill in:
+   - Telegram bot token
+   - Telegram admin chat ID
+   - AI laptop IP in `AI_ANALYZE_URL`
+   - any hostname label you want in `NETWORK_SERVER_NAME`
 
 ## Run Commands
 
-### 1. Main bot/API service
+Main bot/API:
 
 ```bash
 python run_bot.py
 ```
 
-This starts:
-
-- Telegram bot polling
-- main FastAPI ingestion API on port `8000`
-- demo-mode generator loop
-
-### 2. Parser service
+Parser service:
 
 ```bash
 python run_parser.py
 ```
 
-This starts:
+Optional parser run from inside the parser folder:
 
-- parser FastAPI service on port `9001`
-- background parser heartbeat loop to the main API
+```bash
+cd parser_service
+python main.py
+```
+
+That still resolves the same root `.env`.
 
 ## curl Examples
 
-If you are using PowerShell on Windows, prefer `curl.exe` instead of `curl`.
+If you are using PowerShell on Windows, prefer `curl.exe`.
 
-### Parser raw-log ingestion
+### POST `/ingest-log-line`
 
 ```bash
 curl -X POST http://127.0.0.1:9001/ingest-log-line \
@@ -294,7 +307,7 @@ curl -X POST http://127.0.0.1:9001/ingest-log-line \
   }'
 ```
 
-### Parser heartbeat sent to main API
+### POST `/heartbeat/parser`
 
 ```bash
 curl -X POST http://127.0.0.1:8000/heartbeat/parser \
@@ -306,7 +319,7 @@ curl -X POST http://127.0.0.1:8000/heartbeat/parser \
   }'
 ```
 
-### Final analyzed alert sent to main API
+### POST `/ingest-alert`
 
 ```bash
 curl -X POST http://127.0.0.1:8000/ingest-alert \
@@ -350,11 +363,11 @@ curl.exe -X POST http://127.0.0.1:8000/ingest-alert `
 
 1. Start the main service with `python run_bot.py`.
 2. Start the parser service with `python run_parser.py`.
-3. Send `/status` in Telegram and confirm the main API is up.
-4. Send a raw log line to `http://<YOUR_LAPTOP_IP>:9001/ingest-log-line`.
-5. If the AI laptop is reachable, it will score the event.
-6. If the AI laptop is down, the parser falls back to a simple local heuristic so the demo does not stall.
-7. Open Telegram and use `/alerts`, `/summary`, and `/anomaly <id>` to show the final result.
+3. Confirm the main API is up with `/status` in Telegram or `GET /health`.
+4. Send a raw log line to the parser at `http://<YOUR_LAPTOP_IP>:9001/ingest-log-line`.
+5. Let the parser forward the normalized event to the AI laptop.
+6. The parser receives the AI response and posts the final analyzed alert to the main API.
+7. Show the result in Telegram with `/alerts`, `/summary`, and `/anomaly <id>`.
 
 ## Tests
 
@@ -364,7 +377,7 @@ pytest
 
 ## Notes
 
-- The parser remains a separate service and is not merged into `bot.py` or the Telegram command layer.
+- The parser remains a separate process and is not mixed into the Telegram bot code.
 - The existing `/ingest-alert` contract is preserved.
-- Parser heartbeat and AI forwarding failures are handled without crashing the parser service.
-- The parser performs best-effort normalization for malformed log lines and stores recent normalized events in memory.
+- Duplicate alert IDs remain safe because the main storage layer already ignores duplicates.
+- Both services now use one shared root `.env`.

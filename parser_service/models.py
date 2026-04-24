@@ -103,6 +103,7 @@ class ParserHealthResponse(BaseModel):
     parser_port: int
     main_api_url: str
     ai_service_url: str
+    network_server_name: str
     heartbeat_interval_seconds: int
     fallback_analysis_enabled: bool
     total_received: int
